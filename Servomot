@@ -1,0 +1,105 @@
+
+#pragma config BWRP = WRPROTECT_OFF
+#pragma config SWRP = WRPROTECT_OFF
+#pragma config GWRP = OFF
+#pragma config GSS = OFF
+#pragma config FNOSC = FRC
+#pragma config POSCMD = NONE
+#pragma config FWDTEN = OFF
+#pragma config ICS = PGD3
+
+#include "xc.h"
+#include <libpic30.h>
+#include "p33FJ128MC802.h"
+
+// Definiciones
+#define SERVO_MIN 461
+#define SERVO_MAX 921
+
+volatile unsigned int adc_servo = 0;
+volatile unsigned int servo_angle = 90;
+
+void delay(unsigned long int contador);
+void configurar_pines(void);
+void configurar_adc(void);
+void configurar_pwm_servo(void);
+void actualizar_servo(void);
+
+int main(void)
+{
+    configurar_pines();
+    configurar_adc();
+    configurar_pwm_servo();
+
+    while(1)
+    {
+        // Leer ADC para AN0
+        AD1CHS0bits.CH0SA = 0;
+        AD1CON1bits.SAMP = 1;
+        delay(100);
+        AD1CON1bits.SAMP = 0;
+        while(!AD1CON1bits.DONE);
+        adc_servo = ADC1BUF0;
+
+        actualizar_servo();
+        delay(5000);
+    }
+}
+
+void configurar_pines(void)
+{
+    AD1PCFGL = 0xFFFE; // AN0 analógico
+    TRISA = 0x0001;
+    TRISBbits.TRISB4 = 0;
+
+    __builtin_write_OSCCONL(OSCCON & 0xBF);
+    RPOR2bits.RP4R = 18; // OC1 para servo
+    __builtin_write_OSCCONL(OSCCON | 0x40);
+}
+
+void configurar_adc(void)
+{
+    AD1CON1 = 0x0000;
+    AD1CON2 = 0x0000;
+    AD1CON3 = 0x0000;
+    AD1CSSL = 0x0000;
+    AD1CHS0 = 0x0000;
+
+    AD1CON1bits.FORM = 0;
+    AD1CON1bits.SSRC = 7;
+    AD1CON1bits.ASAM = 0;
+    AD1CON2bits.VCFG = 0;
+    AD1CON3bits.SAMC = 31;
+    AD1CON3bits.ADCS = 63;
+    AD1CON1bits.ADON = 1;
+}
+
+void configurar_pwm_servo(void)
+{
+    T2CONbits.TON = 0;
+    T2CONbits.TCS = 0;
+    T2CONbits.TGATE = 0;
+    T2CONbits.TCKPS = 1;
+    PR2 = 9215;
+    TMR2 = 0;
+    T2CONbits.TON = 1;
+
+    OC1CONbits.OCM = 0;
+    OC1CONbits.OCTSEL = 0;
+    OC1R = SERVO_MIN + (SERVO_MAX - SERVO_MIN)/2;
+    OC1RS = OC1R;
+    OC1CONbits.OCM = 6;
+}
+
+void actualizar_servo(void)
+{
+    unsigned long pulso = SERVO_MIN +
+        ((unsigned long)adc_servo * (SERVO_MAX - SERVO_MIN)) / 1023;
+    servo_angle = (unsigned int)(((unsigned long)adc_servo * 180) / 1023);
+    OC1RS = pulso;
+}
+
+void delay(unsigned long int contador)
+{
+    while(contador--);
+}
