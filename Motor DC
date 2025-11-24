@@ -1,0 +1,113 @@
+
+#pragma config BWRP = WRPROTECT_OFF
+#pragma config SWRP = WRPROTECT_OFF
+#pragma config GWRP = OFF
+#pragma config GSS = OFF
+#pragma config FNOSC = FRC
+#pragma config POSCMD = NONE
+#pragma config FWDTEN = OFF
+#pragma config ICS = PGD3
+
+#include "xc.h"
+#include <libpic30.h>
+#include "p33FJ128MC802.h"
+
+// Definiciones
+#define MOTOR_PERIOD 1843
+#define MOTOR_IN1 LATBbits.LATB8
+#define MOTOR_IN2 LATBbits.LATB9
+
+volatile unsigned int adc_motor = 0;
+volatile unsigned char motor_direction = 1;
+
+void delay(unsigned long int contador);
+void configurar_pines(void);
+void configurar_adc(void);
+void configurar_pwm_motor(void);
+void actualizar_motor(void);
+
+int main(void)
+{
+    configurar_pines();
+    configurar_adc();
+    configurar_pwm_motor();
+
+    while(1)
+    {
+        // Leer ADC para AN1
+        AD1CHS0bits.CH0SA = 1;
+        AD1CON1bits.SAMP = 1;
+        delay(100);
+        AD1CON1bits.SAMP = 0;
+        while(!AD1CON1bits.DONE);
+        adc_motor = ADC1BUF0;
+
+        actualizar_motor();
+        delay(5000);
+    }
+}
+
+void configurar_pines(void)
+{
+    AD1PCFGL = 0xFFFD; // AN1 analógico
+    TRISA = 0x0002;
+    TRISBbits.TRISB8 = 0;
+    TRISBbits.TRISB9 = 0;
+
+    __builtin_write_OSCCONL(OSCCON & 0xBF);
+    RPOR3bits.RP7R = 19; // OC2 para motor
+    __builtin_write_OSCCONL(OSCCON | 0x40);
+}
+
+void configurar_adc(void)
+{
+    AD1CON1 = 0x0000;
+    AD1CON2 = 0x0000;
+    AD1CON3 = 0x0000;
+    AD1CSSL = 0x0000;
+    AD1CHS0 = 0x0000;
+
+    AD1CON1bits.FORM = 0;
+    AD1CON1bits.SSRC = 7;
+    AD1CON1bits.ASAM = 0;
+    AD1CON2bits.VCFG = 0;
+    AD1CON3bits.SAMC = 31;
+    AD1CON3bits.ADCS = 63;
+    AD1CON1bits.ADON = 1;
+}
+
+void configurar_pwm_motor(void)
+{
+    T3CONbits.TON = 0;
+    T3CONbits.TCS = 0;
+    T3CONbits.TGATE = 0;
+    T3CONbits.TCKPS = 0;
+    PR3 = 1842;
+    TMR3 = 0;
+    T3CONbits.TON = 1;
+
+    OC2CONbits.OCM = 0;
+    OC2CONbits.OCTSEL = 1;
+    OC2R = 0;
+    OC2RS = 0;
+    OC2CONbits.OCM = 6;
+}
+
+void actualizar_motor(void)
+{
+    unsigned long duty = ((unsigned long)adc_motor * PR3) / 1023;
+    OC2RS = duty;
+
+    if(motor_direction) {
+        MOTOR_IN1 = 1;
+        MOTOR_IN2 = 0;
+    } else {
+        MOTOR_IN1 = 0;
+        MOTOR_IN2 = 1;
+    }
+}
+
+void delay(unsigned long int contador)
+{
+    while(contador--);
+}
