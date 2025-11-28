@@ -1,0 +1,114 @@
+
+#pragma config BWRP = WRPROTECT_OFF
+#pragma config SWRP = WRPROTECT_OFF
+#pragma config GWRP = OFF
+#pragma config GSS = OFF
+#pragma config FNOSC = FRC
+#pragma config POSCMD = NONE
+#pragma config FWDTEN = OFF
+#pragma config ICS = PGD3
+
+#include "xc.h"
+#include <libpic30.h>
+#include "p33FJ128MC802.h"
+
+// ===================== Definiciones =====================
+#define MOTOR_PERIOD 1843
+
+// Motor A (dirección)
+#define MOTOR_IN1A   LATBbits.LATB8
+#define MOTOR_IN2A   LATBbits.LATB9
+
+// Motor B (dirección)
+#define MOTOR_IN1B   LATBbits.LATB11
+#define MOTOR_IN2B   LATBbits.LATB12
+
+// ENABLE general del driver (si aplica)
+#define MOTOR_EN     LATBbits.LATB10
+
+// ===================== Prototipos =====================
+void delay(unsigned long int contador);
+void configurar_pines(void);
+void configurar_pwm_motor(void);
+void actualizar_motores(void);
+
+// ===================== Main =====================
+int main(void)
+{
+    configurar_pines();
+    configurar_pwm_motor();
+
+    while(1)
+    {
+        actualizar_motores();
+        delay(50000); // pequeño delay para estabilizar
+    }
+}
+
+// ===================== Configuración de pines =====================
+void configurar_pines(void)
+{
+    // Dirección y enable como salidas
+    TRISBbits.TRISB8  = 0; // IN1A
+    TRISBbits.TRISB9  = 0; // IN2A
+    TRISBbits.TRISB11 = 0; // IN1B
+    TRISBbits.TRISB12 = 0; // IN2B
+    TRISBbits.TRISB10 = 0; // ENABLE
+
+    // Asegurar que estos pines estén como digitales (si algún ANx comparte puerto)
+    // En este dsPIC, RB8-RB12 son digitales, pero si usaste ADC antes, evita marcarlos como analógicos.
+    // Ejemplo (solo si activaste ADC en otros pines): AD1PCFGL = 0xFFFF;
+
+    // Remapeo de OC2 a RP7 (RB7) para PWM
+    __builtin_write_OSCCONL(OSCCON & 0xBF); // desbloquear mapeo
+    RPOR3bits.RP7R = 19; // 19 = OC2
+    __builtin_write_OSCCONL(OSCCON | 0x40); // bloquear mapeo
+}
+
+// ===================== Configuración PWM (OC2 con T3) =====================
+void configurar_pwm_motor(void)
+{
+    // Timer3 para PWM
+    T3CONbits.TON   = 0;
+    T3CONbits.TCS   = 0; // reloj interno
+    T3CONbits.TGATE = 0;
+    T3CONbits.TCKPS = 0; // prescaler 1:1
+    PR3  = MOTOR_PERIOD; // periodo (~2 kHz con FRC por defecto)
+    TMR3 = 0;
+    T3CONbits.TON   = 1;
+
+    // OC2 configuración
+    OC2CONbits.OCM    = 0; // deshabilitado mientras se configura
+    OC2CONbits.OCTSEL = 1; // usa Timer3
+    OC2R  = 0;             // valor inicial
+    OC2RS = 0;             // duty inicial
+    OC2CONbits.OCM    = 6; // modo PWM edge-aligned
+}
+
+// ===================== Actualización de motores =====================
+void actualizar_motores(void)
+{
+    // Duty fijo (comparten el mismo PWM)
+    OC2RS = PR3 / 2;  // 50% duty. Puedes cambiar a PR3 para 100%
+
+    // Habilitar driver (si tu puente H tiene pin ENA común)
+    MOTOR_EN = 1;
+
+    // Motor A: adelante
+    MOTOR_IN1A = 1;
+    MOTOR_IN2A = 0;
+
+    // Motor B: adelante (misma dirección que A)
+    MOTOR_IN1B = 1;
+    MOTOR_IN2B = 0;
+
+    // Si quieres que el Motor B gire al revés, usa:
+    // MOTOR_IN1B = 0;
+    // MOTOR_IN2B = 1;
+}
+
+// ===================== Delay simple =====================
+void delay(unsigned long int contador)
+{
+    while(contador--);
+}
