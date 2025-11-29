@@ -1,0 +1,196 @@
+
+// ============================================
+// dsPIC33FJ128MC802 + LCD HD44780 via PCF8574 (I2C1)
+// Pines: SCL1=RB8 (pin 17), SDA1=RB9 (pin 18)  [28-SPDIP]
+// Frecuencia I2C: 100 kHz
+// Mapa backpack: A
+// Compilador: XC16
+// Librería delays: libpic30 (usa FCY)
+// ============================================
+
+#define FCY 40000000UL   // <-- Ajusta a tu FCY real
+#include <xc.h>
+#include <libpic30.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+// -------- Bits de configuración (ejemplo, ajústalos a tu reloj) --------
+// Desactiva ALTI2C1 para mantener I2C1 en RB8/RB9 (28-SPDIP suele ser así).
+// _FPOR(ALTI2C1_OFF);   // Pines I2C1 por defecto en el paquete
+// _FWDT(FWDTEN_OFF);    // Watchdog OFF en desarrollo
+// _FOSCSEL(FNOSC_FRCPLL);
+// _FOSC(OSCIOFNC_OFF & POSCMD_NONE);
+// -----------------------------------------------------------------------
+
+// ---------- Dirección I2C del LCD (PCF8574) ----------
+static uint8_t LCD_I2C_ADDR = 0x3F;  // Usamos 0x3F de inicio; el escaneo ajusta.
+
+// ---------- Backlight ----------
+static bool lcd_backlight = true;
+
+// ---------- Mapeo del PCF8574 → LCD (Mapa A) ----------
+#define MASK_RS  (1<<0)  // P0
+#define MASK_RW  (1<<1)  // P1
+#define MASK_EN  (1<<2)  // P2
+#define MASK_BL  (1<<3)  // P3
+#define SHIFT_D4 4       // P4..P7 = D4..D7
+
+// ---------- Fórmula BRG para I2C (dsPIC33F) ----------
+#define I2C_BRG(FCY_, FSCL_) ( ( (FCY_) / (FSCL_) ) - ( (FCY_) / 1111111UL ) - 1 )
+
+// ---------- I2C1 Init ----------
+static void I2C1_Init_100k(void)
+{
+    // Configura pines: RB8=SCL, RB9=SDA en modo open-drain, entradas
+    TRISBbits.TRISB8 = 1;  // SCL1
+    TRISBbits.TRISB9 = 1;  // SDA1
+    ODCBbits.ODCB8  = 1;
+    ODCBbits.ODCB9  = 1;
+
+    I2C1CONbits.I2CEN = 0;
+    I2C1CON = 0x0000;
+    I2C1STAT = 0x0000;
+
+    // Standard Mode (100 kHz): DISSLW=0
+    I2C1CONbits.DISSLW = 0;  // Slew control ON para 100 kHz estándar
+
+    // 7-bit addressing
+    I2C1CONbits.A10M = 0;
+
+    // BRG según FCY/FSCL
+    I2C1BRG = I2C_BRG(FCY, 100000UL);  // ≈363 si FCY=40 MHz
+
+    I2C1CONbits.I2CEN = 1;
+    __delay_ms(2);
+}
+
+static inline void I2C1_WaitIdle(void)
+{
+    while (I2C1CONbits.SEN  || I2C1CONbits.PEN  || I2C1CONbits.RSEN ||
+           I2C1CONbits.RCEN || I2C1CONbits.ACKEN|| I2C1STATbits.TRSTAT);
+}
+static void I2C1_Start(void)    { I2C1_WaitIdle(); I2C1CONbits.SEN  = 1; while (I2C1CONbits.SEN); }
+static void I2C1_Stop(void)     { I2C1_WaitIdle(); I2C1CONbits.PEN  = 1; while (I2C1CONbits.PEN); }
+static void I2C1_Restart(void)  { I2C1_WaitIdle(); I2C1CONbits.RSEN = 1; while (I2C1CONbits.RSEN); }
+
+static bool I2C1_WriteByte(uint8_t b)
+{
+    I2C1_WaitIdle();
+    I2C1TRN = b;
+    while (I2C1STATbits.TRSTAT);
+    if (I2C1STATbits.IWCOL) { I2C1STATbits.IWCOL = 0; return false; }
+    return (I2C1STATbits.ACKSTAT == 0); // true si ACK
+}
+
+// ---------- Envío al PCF8574 ----------
+static bool pcf8574_write(uint8_t data)
+{
+    bool ok;
+    I2C1_Start();
+    ok = I2C1_WriteByte( (LCD_I2C_ADDR << 1) | 0x00 ); // Write
+    if (!ok) { I2C1_Stop(); return false; }
+    ok = I2C1_WriteByte(data);
+    I2C1_Stop();
+    return ok;
+}
+
+// ---------- Helpers LCD ----------
+static void lcd_pulse_enable(uint8_t data)
+{
+    pcf8574_write(data | MASK_EN);
+    __delay_us(1);
+    pcf8574_write(data & ~MASK_EN);
+    __delay_us(50); // tiempo típico de nibble
+}
+
+static void lcd_write4bits(uint8_t nibble, bool rs)
+{
+    uint8_t data = ((nibble & 0x0F) << SHIFT_D4);
+    if (rs) data |= MASK_RS;
+    data &= ~MASK_RW;           // RW=0 (escritura)
+    if (lcd_backlight) data |= MASK_BL;
+    lcd_pulse_enable(data);
+}
+
+static void lcd_send(uint8_t value, bool rs)
+{
+    lcd_write4bits(value >> 4, rs);
+    lcd_write4bits(value & 0x0F, rs);
+}
+
+static void lcd_command(uint8_t cmd)  { lcd_send(cmd, false); }
+static void lcd_write_char(uint8_t c) { lcd_send(c, true);  }
+
+// ---------- Inicialización HD44780 en 4 bits ----------
+static void lcd_init(void)
+{
+    __delay_ms(50); // power-up
+
+    // Secuencia 4 bits: 0x3 x3, luego 0x2
+    lcd_write4bits(0x03, false); __delay_ms(5);
+    lcd_write4bits(0x03, false); __delay_us(150);
+    lcd_write4bits(0x03, false); __delay_us(150);
+    lcd_write4bits(0x02, false); __delay_us(150);
+
+    lcd_command(0x28); // 4-bit, 2 líneas, 5x8
+    lcd_command(0x0C); // Display ON, Cursor OFF, Blink OFF
+    lcd_command(0x01); // Clear
+    __delay_ms(2);
+    lcd_command(0x06); // Entry mode: incremento, sin shift
+}
+
+static void lcd_set_backlight(bool on)
+{
+    lcd_backlight = on;
+    uint8_t d = (on ? MASK_BL : 0);
+    pcf8574_write(d);
+}
+
+static void lcd_set_cursor(uint8_t col, uint8_t row)
+{
+    static const uint8_t row_offsets[] = {0x00, 0x40, 0x14, 0x54};
+    lcd_command(0x80 | (col + row_offsets[row]));
+}
+
+static void lcd_print(const char* s)
+{
+    while (*s) lcd_write_char((uint8_t)*s++);
+}
+
+// ---------- Escaneo I2C para detectar dirección (0x08..0x7F) ----------
+static void i2c_scan_bus(void)
+{
+    for (uint8_t addr = 0x08; addr <= 0x7F; addr++) {
+        I2C1_Start();
+        bool ack = I2C1_WriteByte( (addr << 1) | 0x00 );
+        I2C1_Stop();
+        if (ack) {
+            // Si detecta 0x27/0x3F, actualiza dirección del LCD
+            if (addr == 0x27 || addr == 0x3F) LCD_I2C_ADDR = addr;
+        }
+        __delay_ms(2);
+    }
+}
+
+// ---------- MAIN ----------
+int main(void)
+{
+    // Configura tu reloj aquí y ajusta FCY arriba.
+    I2C1_Init_100k();    // 100 kHz
+    __delay_ms(10);
+
+    i2c_scan_bus();      // confirmamos 0x27/0x3F automáticamente
+
+    lcd_set_backlight(true);
+    lcd_init();
+
+    lcd_set_cursor(0, 0);
+    lcd_print("Hola, dsPIC!");
+    lcd_set_cursor(0, 1);
+    lcd_print("I2C + PCF8574");
+
+    while (1) {
+        // tu aplicación
+    }
+    return 0;
+}
